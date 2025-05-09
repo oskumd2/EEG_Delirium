@@ -1,45 +1,182 @@
-import os, shutil, random, time, base64, pickle
-from collections import Counter
-from glob import glob
-from tqdm import tqdm
-from PIL import Image
-from lxml import etree as ET
-#import xml.etree.ElementTree as ET
 import warnings
-warnings.filterwarnings("ignore")
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-from sklearn.utils import resample, shuffle
-from sklearn.metrics import accuracy_score, roc_auc_score,RocCurveDisplay, roc_curve, auc
-from scipy import signal
-from skmultilearn.model_selection import iterative_train_test_split
-from sklearn.model_selection import GroupKFold
-from sklearn.calibration import calibration_curve, CalibrationDisplay
-from sklearn.utils import resample
+from sklearn.metrics import roc_curve, roc_auc_score, average_precision_score, f1_score, accuracy_score, precision_score, recall_score, auc, RocCurveDisplay
 import seaborn
+warnings.filterwarnings("ignore")
 
-def draw_roc_curve(y_test, y_test_proba):
+def brier_score_loss(y_true, y_pred):
+    """
+    Calculate Brier score loss between true labels and predicted probabilities
+    Lower values indicate better calibrated predictions (0 is perfect)
+    """
+    return np.mean((y_true - y_pred) ** 2)
+
+def integrated_calibration_index(y_true, y_pred, n_bins=100):
+    """
+    Calculate integrated calibration index (ICI)
+    Lower values indicate better calibration (0 is perfect)
+    """
+    # Sort predictions and corresponding true values
+    sort_idx = np.argsort(y_pred)
+    y_pred_sorted = y_pred[sort_idx]
+    y_true_sorted = y_true[sort_idx]
+    
+    # Calculate calibration curve using moving average
+    window = len(y_true) // n_bins
+    if window < 1:
+        window = 1
+    
+    calibration_curve = np.array([
+        np.mean(y_true_sorted[max(0, i-window):min(len(y_true), i+window)])
+        for i in range(len(y_true))
+    ])
+    
+    # Calculate absolute difference between predictions and calibration curve
+    ici = np.mean(np.abs(y_pred_sorted - calibration_curve))
+    return ici
+
+def bootstrap_ci(y_true, y_pred, y_pred_binary, n_bootstraps=4000, alpha=0.05):
+    """Calculate bootstrap confidence intervals for various metrics."""
+    
+    n_samples = len(y_true)
+    results = {
+        'AUROC': [],
+        'AUPRC': [],
+        'F1': [],
+        'Accuracy': [],
+        'Precision': [],
+        'Recall': [],
+        'Brier': [],
+        'ICI': []
+    }
+    
+    for _ in range(n_bootstraps):
+        indices = np.random.choice(n_samples, n_samples, replace=True)
+            
+        # Get bootstrap samples
+        boot_y_true = y_true[indices]
+        boot_y_pred = y_pred[indices]
+        boot_y_pred_binary = y_pred_binary[indices]
+        
+        # Calculate metrics
+        results['AUROC'].append(roc_auc_score(boot_y_true, boot_y_pred))
+        results['AUPRC'].append(average_precision_score(boot_y_true, boot_y_pred))
+        results['F1'].append(f1_score(boot_y_true, boot_y_pred_binary))
+        results['Accuracy'].append(accuracy_score(boot_y_true, boot_y_pred_binary))
+        results['Precision'].append(precision_score(boot_y_true, boot_y_pred_binary))
+        results['Recall'].append(recall_score(boot_y_true, boot_y_pred_binary))
+        results['Brier'].append(brier_score_loss(boot_y_true, boot_y_pred))
+        results['ICI'].append(integrated_calibration_index(boot_y_true, boot_y_pred))
+    
+    # Calculate confidence intervals
+    ci = {}
+    for metric, values in results.items():
+        # Filter out any NaN values that might have occurred
+        values = np.array(values)
+        values = values[~np.isnan(values)]
+        if len(values) > 0:
+            lower = np.percentile(values, alpha/2 * 100)
+            upper = np.percentile(values, (1 - alpha/2) * 100)
+            ci[metric] = (lower, upper)
+        else:
+            ci[metric] = (np.nan, np.nan)
+    
+    return ci
+
+def draw_model_evaluation_plots(y_test, y_test_proba, y_pred_test, n_bins=10):
+    AUROC = roc_auc_score(y_test, y_test_proba)
+    AUPRC = average_precision_score(y_test, y_test_proba)
+    F1_score = f1_score(y_test, y_pred_test)
+    brier_score = brier_score_loss(y_test, y_test_proba)
+    ici = integrated_calibration_index(y_test, y_test_proba)
+    ci_metrics = bootstrap_ci(y_test, y_test_proba, y_pred_test)
+    print(f'AUROC {AUROC:.3f} (95% CI: {ci_metrics["AUROC"][0]:.3f}-{ci_metrics["AUROC"][1]:.3f})')
+    print(f'AUPRC {AUPRC:.3f} (95% CI: {ci_metrics["AUPRC"][0]:.3f}-{ci_metrics["AUPRC"][1]:.3f})')
+    print(f'F1 Score {F1_score:.3f} (95% CI: {ci_metrics["F1"][0]:.3f}-{ci_metrics["F1"][1]:.3f})')
+    print(f'Test Accuracy {(accuracy_score(y_test, y_pred_test)):.3f} (95% CI: {ci_metrics["Accuracy"][0]:.3f}-{ci_metrics["Accuracy"][1]:.3f})')
+    print(f'Brier Score {brier_score:.3f} (95% CI: {ci_metrics["Brier"][0]:.3f}-{ci_metrics["Brier"][1]:.3f})')
+    print(f'ICI {ici:.3f} (95% CI: {ci_metrics["ICI"][0]:.3f}-{ci_metrics["ICI"][1]:.3f})')
+    """
+    Draw four evaluation plots in a 1x4 layout:
+    1. Calibration plot with error bars
+    2. ROC curve
+    3. Confusion matrix
+    4. Probability histogram
+    """
+    fig, axes = plt.subplots(1, 4, figsize=(24, 6), tight_layout=True)
+    
+    # Ensure all plots have the same height and size
+    for ax in axes:
+        ax.set_box_aspect(1)
+    
+    # 1. Calibration plot with error bars
+    plt.sca(axes[0])
+    # Add (a) label above the plot
+    axes[0].set_title('(a)', fontsize=14, fontweight='bold', loc='left', pad=10)
+    
+    # Create bins and find probabilities in each bin
+    bins = np.linspace(0, 1, n_bins + 1)
+    binids = np.digitize(y_test_proba, bins) - 1
+    
+    bin_true = np.zeros(n_bins)
+    bin_pred = np.zeros(n_bins)
+    bin_errors = np.zeros(n_bins)
+    bin_sizes = np.zeros(n_bins)
+    
+    # Calculate statistics for each bin
+    for bin_idx in range(n_bins):
+        bin_mask = binids == bin_idx
+        if np.sum(bin_mask) > 0:  # Check if bin has any samples
+            bin_sizes[bin_idx] = np.sum(bin_mask)
+            bin_true[bin_idx] = np.mean(y_test[bin_mask])
+            bin_pred[bin_idx] = np.mean(y_test_proba[bin_mask])
+            # Calculate standard error for the bin
+            bin_errors[bin_idx] = np.std(y_test[bin_mask]) / np.sqrt(bin_sizes[bin_idx])
+    
+    # Plot calibration
+    plt.plot([0, 1], [0, 1], 'k:', label='Perfectly calibrated')
+    plt.errorbar(bin_pred, bin_true, yerr=bin_errors, 
+                fmt='o', color='red', ecolor='gray', 
+                capsize=3, capthick=1, markersize=4,
+                label='Model calibration')
+    
+    plt.xlabel('Mean predicted probability')
+    plt.ylabel('True probability')
+    plt.legend(loc='upper left')
+    plt.grid(True, alpha=0.3)
+    
+    # 2. ROC curve
+    plt.sca(axes[1])
+    # Add (b) label above the plot
+    axes[1].set_title('(b)', fontsize=14, fontweight='bold', loc='left', pad=10)
+    
     fpr, tpr, thresholds = roc_curve(y_test, y_test_proba)
     roc_auc = auc(fpr, tpr)
-    display = RocCurveDisplay(fpr=fpr, tpr=tpr, roc_auc=roc_auc,
-                            estimator_name='Model')
-    display.plot()
-    plt.show()    
-
-def draw_confusion_matrix(y_test, y_pred_test):
-    fontsize = 20
+    plt.plot(fpr, tpr, lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')
+    plt.plot([0, 1], [0, 1], 'k:', lw=2)
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.legend(loc='lower right')
+    plt.grid(True, alpha=0.3)
+    
+    # 3. Confusion matrix
+    plt.sca(axes[2])
+    # Add (c) label above the plot
+    axes[2].set_title('(c)', fontsize=14, fontweight='bold', loc='left', pad=10)
+    
+    fontsize = 12
     contingency_table = pd.crosstab(y_test, y_pred_test)
-    contingency_table
     contingency_table.columns = ['Normal', 'Delirium']
     contingency_table.columns.name = 'Label'
     contingency_table.index = ['Normal', 'Delirium']
     contingency_table.index.name = 'Prediction'
     contingency_percentage = contingency_table / len(y_test) * 100
-    plt.figure(figsize=(8, 6))
-    ax = seaborn.heatmap(contingency_table, annot=False, fmt="d", cmap='Blues', annot_kws={"size": 16})
+    
+    ax = seaborn.heatmap(contingency_table, annot=False, fmt="d", cmap='Blues', annot_kws={"size": 12}, ax=axes[2])
     for i in range(contingency_table.shape[0]):
         for j in range(contingency_table.shape[1]):
             if i == 0 and j == 0:
@@ -60,136 +197,19 @@ def draw_confusion_matrix(y_test, y_pred_test):
     ax.set_xticklabels(ax.get_xticklabels(), fontsize=fontsize)
     ax.set_yticklabels(ax.get_yticklabels(), fontsize=fontsize)
     plt.ylabel('Label', fontsize=fontsize)
-    plt.show()
-
-def draw_y_test_proba(y_test_proba):
+    
+    # 4. Probability histogram
+    plt.sca(axes[3])
+    # Add (d) label above the plot
+    axes[3].set_title('(d)', fontsize=14, fontweight='bold', loc='left', pad=10)
+    
     plt.hist(y_test_proba, bins=50, edgecolor='black')
     plt.xlabel('Probability')
     plt.ylabel('Frequency')
-    plt.title('Test probability histogram')
+    
+    # Align all title positions to ensure (a),(b),(c),(d) are at the same height
+    title_y_pos = 1.05
+    for ax in axes:
+        ax.title.set_position([0.0, title_y_pos])
+    
     plt.show()
-
-def draw_calibration_plot(prob_true, prob_pred , y_test_proba, n_bins, ax_end):
-    hist, bin_edges = np.histogram(prob_true, bins=n_bins, range=(0, 1))
-    bin_std = []
-    for i in range(n_bins):
-        bin_data = y_test_proba[(y_test_proba >= bin_edges[i]) & (y_test_proba < bin_edges[i+1])]
-        bin_std.append(np.std(bin_data))
-    
-    bin_std = [value for value in bin_std if not np.isnan(value)]
-    fig, ax = plt.subplots()
-    ax.errorbar(prob_pred, prob_true , fmt='o', color='black', yerr=bin_std, markersize=3) #yerr=bin_std
-    ax.plot([0, ax_end], [0, ax_end], "k:", label="Perfectly calibrated")
-    ax.set_xlabel("Predicted probability")
-    ax.set_ylabel("True probability")
-    ax.set_title("Calibration Curve")
-    ax.legend()
-    plt.show()
-
-
-def draw_calibration_plot_with_error_bars(y_test, y_test_proba, n_bins=10):
-    # Create bins and find probabilities in each bin
-    bins = np.linspace(0, 1, n_bins + 1)
-    binids = np.digitize(y_test_proba, bins) - 1
-    
-    bin_true = np.zeros(n_bins)
-    bin_pred = np.zeros(n_bins)
-    bin_errors = np.zeros(n_bins)
-    bin_sizes = np.zeros(n_bins)
-    
-    # Calculate statistics for each bin
-    for bin_idx in range(n_bins):
-        bin_mask = binids == bin_idx
-        if np.sum(bin_mask) > 0:  # Check if bin has any samples
-            bin_sizes[bin_idx] = np.sum(bin_mask)
-            bin_true[bin_idx] = np.mean(y_test[bin_mask])
-            bin_pred[bin_idx] = np.mean(y_test_proba[bin_mask])
-            # Calculate standard error for the bin
-            bin_errors[bin_idx] = np.std(y_test[bin_mask]) / np.sqrt(bin_sizes[bin_idx])
-    
-    # Create the plot
-    plt.figure(figsize=(8, 8))
-    plt.plot([0, 1], [0, 1], 'k:', label='Perfectly calibrated')
-    
-    # Plot points with error bars
-    plt.errorbar(bin_pred, bin_true, yerr=bin_errors, 
-                fmt='o', color='red', ecolor='gray', 
-                capsize=3, capthick=1, markersize=4,
-                label='Model calibration')
-    
-    plt.xlabel('Mean predicted probability')
-    plt.ylabel('True probability')
-    #plt.title('Calibration Plot with Error Bars')
-    plt.legend(loc='lower right')
-    plt.grid(True, alpha=0.3)
-    plt.show()
-
-def draw_scatter_plot(y1,y2):
-    plt.figure(figsize=(8, 6))
-    plt.scatter(y1,y2, alpha=0.5)
-    plt.xlabel('Suppression ratio')
-    plt.ylabel('Predicted probability of the model')
-    plt.grid(True, linestyle='--', alpha=0.7)
-    # Add correlation coefficient
-    correlation = np.corrcoef(y1,y2)[0, 1]
-    plt.annotate(f'Correlation: {correlation:.4f}', 
-                 xy=(0.05, 0.95), 
-                 xycoords='axes fraction',
-                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8))
-    plt.tight_layout()
-    plt.show()
-
- 
-    
-def bootstrap_delong_test(y_true, pred1, pred2, n_bootstraps=1000, random_state=42):
-    """
-    Perform bootstrapped Delong's test to compare two ROC curves.
-    
-    Parameters:
-    -----------
-    y_true : array-like
-        True binary labels
-    pred1 : array-like
-        Predictions from first model
-    pred2 : array-like
-        Predictions from second model
-    n_bootstraps : int
-        Number of bootstrap samples
-    random_state : int
-        Random seed for reproducibility
-        
-    Returns:
-    --------
-    p_value : float
-        p-value from the bootstrapped test
-    """
-    np.random.seed(random_state)
-    n_samples = len(y_true)
-    
-    # Calculate the original AUC difference
-    auc1 = roc_auc_score(y_true, pred1)
-    auc2 = roc_auc_score(y_true, pred2)
-    observed_diff = abs(auc1 - auc2)
-    
-    # Bootstrap to get p-value
-    count = 0
-    for i in range(n_bootstraps):
-        # Generate bootstrap sample indices
-        indices = resample(range(n_samples), replace=True, n_samples=n_samples)
-        
-        # Calculate AUCs on bootstrap sample
-        if len(np.unique(y_true[indices])) < 2:
-            # Skip iteration if bootstrap sample has only one class
-            continue
-            
-        boot_auc1 = roc_auc_score(y_true[indices], pred1[indices])
-        boot_auc2 = roc_auc_score(y_true[indices], pred2[indices])
-        boot_diff = abs(boot_auc1 - boot_auc2)
-        
-        # Count how many bootstrap differences are >= observed difference
-        if boot_diff >= observed_diff:
-            count += 1
-    
-    # Calculate p-value
-    p_value = count / n_bootstraps
-    return p_value

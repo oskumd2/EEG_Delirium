@@ -38,7 +38,8 @@ def integrated_calibration_index(y_true, y_pred, n_bins=100):
     return ici
 
 def bootstrap_ci(y_true, y_pred, y_pred_binary, n_bootstraps=4000, alpha=0.05):
-    """Calculate bootstrap confidence intervals for various metrics."""
+    """Calculate bootstrap confidence intervals for various metrics, 
+    avoiding errors when only one class is present in y_true."""
     
     n_samples = len(y_true)
     results = {
@@ -60,15 +61,50 @@ def bootstrap_ci(y_true, y_pred, y_pred_binary, n_bootstraps=4000, alpha=0.05):
         boot_y_pred = y_pred[indices]
         boot_y_pred_binary = y_pred_binary[indices]
         
-        # Calculate metrics
-        results['AUROC'].append(roc_auc_score(boot_y_true, boot_y_pred))
-        results['AUPRC'].append(average_precision_score(boot_y_true, boot_y_pred))
-        results['F1'].append(f1_score(boot_y_true, boot_y_pred_binary))
-        results['Accuracy'].append(accuracy_score(boot_y_true, boot_y_pred_binary))
-        results['Precision'].append(precision_score(boot_y_true, boot_y_pred_binary))
-        results['Recall'].append(recall_score(boot_y_true, boot_y_pred_binary))
-        results['Brier'].append(brier_score_loss(boot_y_true, boot_y_pred))
-        results['ICI'].append(integrated_calibration_index(boot_y_true, boot_y_pred))
+        # Check if both classes are present in the bootstrap sample
+        unique_classes = np.unique(boot_y_true)
+        if len(unique_classes) < 2:
+            # Not enough classes to compute AUROC/AUPRC/F1/Precision/Recall
+            results['AUROC'].append(np.nan)
+            results['AUPRC'].append(np.nan)
+            results['F1'].append(np.nan)
+            results['Precision'].append(np.nan)
+            results['Recall'].append(np.nan)
+        else:
+            try:
+                results['AUROC'].append(roc_auc_score(boot_y_true, boot_y_pred))
+            except ValueError:
+                results['AUROC'].append(np.nan)
+            try:
+                results['AUPRC'].append(average_precision_score(boot_y_true, boot_y_pred))
+            except ValueError:
+                results['AUPRC'].append(np.nan)
+            try:
+                results['F1'].append(f1_score(boot_y_true, boot_y_pred_binary))
+            except ValueError:
+                results['F1'].append(np.nan)
+            try:
+                results['Precision'].append(precision_score(boot_y_true, boot_y_pred_binary))
+            except ValueError:
+                results['Precision'].append(np.nan)
+            try:
+                results['Recall'].append(recall_score(boot_y_true, boot_y_pred_binary))
+            except ValueError:
+                results['Recall'].append(np.nan)
+        
+        # Accuracy, Brier, and ICI can be computed regardless of class presence
+        try:
+            results['Accuracy'].append(accuracy_score(boot_y_true, boot_y_pred_binary))
+        except ValueError:
+            results['Accuracy'].append(np.nan)
+        try:
+            results['Brier'].append(brier_score_loss(boot_y_true, boot_y_pred))
+        except ValueError:
+            results['Brier'].append(np.nan)
+        try:
+            results['ICI'].append(integrated_calibration_index(boot_y_true, boot_y_pred))
+        except ValueError:
+            results['ICI'].append(np.nan)
     
     # Calculate confidence intervals
     ci = {}
@@ -85,16 +121,20 @@ def bootstrap_ci(y_true, y_pred, y_pred_binary, n_bootstraps=4000, alpha=0.05):
     
     return ci
 
-def draw_model_evaluation_plots(y_test, y_test_proba, y_pred_test, n_bins=10):
+def draw_model_evaluation_plots(y_test, y_test_proba, y_pred_test, n_bins=10, n_bootstraps=4000, alpha=0.05):
     AUROC = roc_auc_score(y_test, y_test_proba)
     AUPRC = average_precision_score(y_test, y_test_proba)
     F1_score = f1_score(y_test, y_pred_test)
     brier_score = brier_score_loss(y_test, y_test_proba)
     ici = integrated_calibration_index(y_test, y_test_proba)
-    ci_metrics = bootstrap_ci(y_test, y_test_proba, y_pred_test)
+    precision = precision_score(y_test, y_pred_test)
+    recall = recall_score(y_test, y_pred_test)
+    ci_metrics = bootstrap_ci(y_test, y_test_proba, y_pred_test, n_bootstraps, alpha)
     print(f'AUROC {AUROC:.3f} (95% CI: {ci_metrics["AUROC"][0]:.3f}-{ci_metrics["AUROC"][1]:.3f})')
     print(f'AUPRC {AUPRC:.3f} (95% CI: {ci_metrics["AUPRC"][0]:.3f}-{ci_metrics["AUPRC"][1]:.3f})')
     print(f'F1 Score {F1_score:.3f} (95% CI: {ci_metrics["F1"][0]:.3f}-{ci_metrics["F1"][1]:.3f})')
+    print(f'Precision {precision:.3f} (95% CI: {ci_metrics["Precision"][0]:.3f}-{ci_metrics["Precision"][1]:.3f})')
+    print(f'Recall {recall:.3f} (95% CI: {ci_metrics["Recall"][0]:.3f}-{ci_metrics["Recall"][1]:.3f})')
     print(f'Test Accuracy {(accuracy_score(y_test, y_pred_test)):.3f} (95% CI: {ci_metrics["Accuracy"][0]:.3f}-{ci_metrics["Accuracy"][1]:.3f})')
     print(f'Brier Score {brier_score:.3f} (95% CI: {ci_metrics["Brier"][0]:.3f}-{ci_metrics["Brier"][1]:.3f})')
     print(f'ICI {ici:.3f} (95% CI: {ci_metrics["ICI"][0]:.3f}-{ci_metrics["ICI"][1]:.3f})')

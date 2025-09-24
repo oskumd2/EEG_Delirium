@@ -1,6 +1,6 @@
 # A Deep Learning-based Prediction Model for Postoperative Delirium Using Intraoperative Electroencephalogram
 
-This is the official codebase for the paper "A Deep Learning-based Prediction Model for Postoperative Delirium Using Intraoperative Electroencephalogram".
+This is the official codebase for the paper "A Deep Learning-based Prediction Model for Postoperative Delirium Using Intraoperative Electroencephalogram" for npj Digital Medicine (2025).
 
 ## Usage
 
